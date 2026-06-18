@@ -1,32 +1,51 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
+import Editor from "@monaco-editor/react";
 
 import socket from "../socket";
 import { getMessages } from "../services/messageService";
 
 function InterviewRoom() {
-
   const { roomId } = useParams();
 
   const user = JSON.parse(
     localStorage.getItem("user")
   );
-console.log("USER:", user);
+
+  // CHAT STATES
   const [messages, setMessages] =
     useState([]);
 
   const [input, setInput] =
     useState("");
 
+  // EDITOR STATES
+  const [code, setCode] =
+    useState(`// Welcome to CollabCode
+
+function hello() {
+  console.log("Hello World");
+}`);
+
+  const [language, setLanguage] =
+    useState("javascript");
+
+  const [output, setOutput] =
+    useState("");
+
+  async function loadMessages() {
+    try {
+      const data =
+        await getMessages(roomId);
+
+      setMessages(data);
+    } catch (error) {
+      console.log(error);
+    }
+  }
+
   useEffect(() => {
-
     loadMessages();
-
-console.log({
-  roomId,
-  sender: user?._id,
-  message: input,
-});
 
     socket.emit(
       "join-room",
@@ -36,59 +55,75 @@ console.log({
     socket.on(
       "receive-message",
       (message) => {
-
         setMessages((prev) => [
           ...prev,
           message,
         ]);
-
       }
     );
 
+socket.on(
+  "receive-code",
+  (newCode) => {
+
+    setCode((prev) => {
+      if (prev === newCode)
+        return prev;
+
+      return newCode;
+    });
+
+  }
+);
+
     return () => {
-      socket.off(
-        "receive-message"
-      );
-    };
 
-  }, []);
+  socket.off(
+    "receive-message"
+  );
 
-  const loadMessages = async () => {
+  socket.off(
+    "receive-code"
+  );
 
-    try {
+};
 
-      const data =
-        await getMessages(
-          roomId
-        );
+  }, [roomId]);
 
-      setMessages(data);
+  const sendMessage = () => {
+    if (!input.trim()) return;
 
-    } catch (error) {
+    socket.emit(
+      "send-message",
+      {
+        roomId,
+        sender:
+          user?._id ||
+          user?.id,
+        message: input,
+      }
+    );
 
-      console.log(error);
-
-    }
+    setInput("");
   };
 
- const sendMessage = () => {
+ const handleCodeChange = (
+  value
+) => {
 
-  console.log({
-    roomId,
-    sender: user._id,
-    message: input,
-  });
+  const newCode =
+    value || "";
+
+  setCode(newCode);
 
   socket.emit(
-    "send-message",
+    "code-change",
     {
       roomId,
-      sender: user._id,
-      message: input,
+      code: newCode,
     }
   );
 
-  setInput("");
 };
 
   return (
@@ -116,69 +151,135 @@ console.log({
 
       {/* Chat Section */}
 
-      <div className="max-w-4xl mx-auto p-6">
+      <div className="max-w-7xl mx-auto p-6">
+      <div className="grid lg:grid-cols-3 gap-6">
 
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl h-[500px] flex flex-col">
+  {/* CODE EDITOR */}
 
-          {/* Messages */}
+  <div className="col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-3">
+    <div className="p-4 border-b border-slate-800 flex justify-between">
 
-            {messages.map(
-              (msg) => (
+      <h2 className="text-white font-semibold">
+        Code Editor
+      </h2>
 
-                <div
-                  key={msg._id}
-                  className="bg-slate-800 p-3 rounded-lg"
-                >
+      <select
+        value={language}
+        onChange={(e) =>
+          setLanguage(e.target.value)
+        }
+        className="bg-slate-800 text-white px-3 py-1 rounded"
+      >
+        <option value="javascript">
+          JavaScript
+        </option>
 
-                  <p className="text-blue-400 text-sm">
-                    {
-                      msg.sender
-                        ?.name ||
-                      "User"
-                    }
-                  </p>
+        <option value="java">
+          Java
+        </option>
 
-                  <p className="text-white">
-                    {msg.message}
-                  </p>
+        <option value="cpp">
+          C++
+        </option>
 
-                </div>
+        <option value="python">
+          Python
+        </option>
+      </select>
 
-              )
-            )}
+    </div>
 
-          </div>
+   <Editor
+  height="600px"
+  language={language}
+  theme="vs-dark"
+  value={code}
+  onChange={handleCodeChange}
+/>
 
-          {/* Input */}
+ 
+<div className="border-t border-slate-800 p-4">
 
-          <div className="border-t border-slate-800 p-4 flex gap-3">
+  <button
+    className="bg-green-600 hover:bg-green-700 px-5 py-2 rounded text-white"
+  >
+    Run Code
+  </button>
 
-            <input
-              type="text"
-              value={input}
-              onChange={(e) =>
-                setInput(
-                  e.target.value
-                )
-              }
-              placeholder="Type message..."
-              className="flex-1 px-4 py-3 bg-slate-800 border border-slate-700 rounded-lg text-white outline-none"
-            />
+</div>
 
-            <button
-              onClick={
-                sendMessage
-              }
-              className="bg-blue-600 hover:bg-blue-700 px-6 rounded-lg text-white"
-            >
-              Send
-            </button>
+<div className="bg-slate-950 border-t border-slate-800 p-4">
 
-          </div>
+  <h3 className="text-white mb-2">
+    Output
+  </h3>
+
+  <pre className="text-green-400 whitespace-pre-wrap">
+    {output}
+  </pre>
+
+</div>
+ </div>
+  {/* CHAT */}
+
+  <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[670px]">
+
+    <div className="p-4 border-b border-slate-800">
+
+      <h2 className="text-white font-semibold">
+        Chat
+      </h2>
+
+    </div>
+
+    <div className="flex-1 overflow-y-auto p-4 space-y-3">
+
+      {messages.map((msg) => (
+
+        <div
+          key={msg._id}
+          className="bg-slate-800 p-3 rounded-lg"
+        >
+
+          <p className="text-blue-400 text-sm">
+            {msg.sender?.name || "User"}
+          </p>
+
+          <p className="text-white">
+            {msg.message}
+          </p>
 
         </div>
+
+      ))}
+
+    </div>
+
+    <div className="border-t border-slate-800 p-4 flex gap-2">
+
+      <input
+        type="text"
+        value={input}
+        onChange={(e) =>
+          setInput(e.target.value)
+        }
+        placeholder="Type message..."
+        className="flex-1 px-3 py-2 bg-slate-800 rounded text-white"
+      />
+
+      <button
+        onClick={sendMessage}
+        className="bg-blue-600 px-4 rounded text-white"
+      >
+        Send
+      </button>
+
+    </div>
+
+  </div>
+
+</div>
 
       </div>
 

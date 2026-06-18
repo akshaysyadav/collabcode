@@ -19,42 +19,55 @@ const socketHandler = (io) => {
 
     // SEND MESSAGE
     socket.on(
-  "send-message",
-  async ({ roomId, sender, message }) => {
+      "send-message",
+      async ({ roomId, sender, message }) => {
 
-    try {
+        try {
 
-      console.log({
-        roomId,
-        sender,
-        message,
-      });
+          console.log({
+            roomId,
+            sender,
+            message,
+          });
 
-      if (!sender) {
-        console.log("Sender Missing");
-        return;
+          if (!sender) {
+            console.log("Sender Missing");
+            return;
+          }
+
+          const newMessage =
+            await Message.create({
+              roomId,
+              sender,
+              message,
+            });
+
+          io.to(roomId).emit(
+            "receive-message",
+            newMessage
+          );
+
+        } catch (error) {
+
+          console.log(error);
+
+        }
+
       }
+    );
 
-      const newMessage =
-        await Message.create({
-          roomId,
-          sender,
-          message,
-        });
+    // LIVE CODE SYNC
+    socket.on(
+      "code-change",
+      ({ roomId, code }) => {
 
-      io.to(roomId).emit(
-        "receive-message",
-        newMessage
-      );
+        socket.to(roomId).emit(
+          "receive-code",
+          code
+        );
 
-    } catch (error) {
-
-      console.log(error);
-
-    }
-
-  }
-);
+      }
+    );
 
     socket.on("disconnect", () => {
 
