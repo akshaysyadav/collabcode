@@ -22,21 +22,36 @@ const socketHandler = (io) => {
   "send-message",
   async ({ roomId, sender, message }) => {
 
-    console.log("Message Received:", message);
+    try {
 
-    const newMessage =
-      await Message.create({
+      console.log({
         roomId,
         sender,
         message,
       });
 
-    console.log("Saved To MongoDB");
+      if (!sender) {
+        console.log("Sender Missing");
+        return;
+      }
 
-    io.to(roomId).emit(
-      "receive-message",
-      newMessage
-    );
+      const newMessage =
+        await Message.create({
+          roomId,
+          sender,
+          message,
+        });
+
+      io.to(roomId).emit(
+        "receive-message",
+        newMessage
+      );
+
+    } catch (error) {
+
+      console.log(error);
+
+    }
 
   }
 );
