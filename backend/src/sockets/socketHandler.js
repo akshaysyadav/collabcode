@@ -1,5 +1,7 @@
 const Message = require("../models/Message");
 
+const roomUsers = {};
+
 const socketHandler = (io) => {
 
   io.on("connection", (socket) => {
@@ -7,15 +9,47 @@ const socketHandler = (io) => {
     console.log(`User Connected: ${socket.id}`);
 
     // JOIN ROOM
-    socket.on("join-room", (roomId) => {
+    socket.on("join-room", ({ roomId, user }) => {
+console.log(
+    "JOIN ROOM RECEIVED",
+    user.name
+  );
 
-      socket.join(roomId);
+  socket.join(roomId);
 
-      console.log(
-        `${socket.id} joined room ${roomId}`
-      );
+  socket.roomId = roomId;
+  socket.user = user;
 
-    });
+if (!roomUsers[roomId]) {
+  roomUsers[roomId] = [];
+}
+
+const alreadyExists =
+  roomUsers[roomId].find(
+    (u) =>
+      (u.user.id || u.user._id) ===
+      (user.id || user._id)
+  );
+
+if (!alreadyExists) {
+
+  roomUsers[roomId].push({
+    socketId: socket.id,
+    user,
+  });
+
+}
+
+  io.to(roomId).emit(
+    "room-users",
+    roomUsers[roomId]
+  );
+
+  console.log(
+    `${user.name} joined ${roomId}`
+  );
+
+});
 
     // SEND MESSAGE
     socket.on(
@@ -57,25 +91,52 @@ const socketHandler = (io) => {
     );
 
     // LIVE CODE SYNC
-    socket.on(
-      "code-change",
-      ({ roomId, code }) => {
 
-        socket.to(roomId).emit(
-          "receive-code",
-          code
-        );
+  socket.on("disconnect", () => {
 
-      }
-    );
+  const roomId = socket.roomId;
 
-    socket.on("disconnect", () => {
+  if (
+    roomId &&
+    roomUsers[roomId]
+  ) {
 
-      console.log(
-        `User Disconnected: ${socket.id}`
+    roomUsers[roomId] =
+      roomUsers[roomId].filter(
+        (u) =>
+          u.socketId !== socket.id
       );
 
-    });
+    io.to(roomId).emit(
+      "room-users",
+      roomUsers[roomId]
+    );
+
+  }
+
+  console.log(
+    `User Disconnected: ${socket.id}`
+  );
+
+});
+
+socket.on(
+  "code-change",
+  ({ roomId, code }) => {
+
+    console.log(
+      "Code Change:",
+      roomId
+    );
+
+    socket.to(roomId).emit(
+      "receive-code",
+      code
+    );
+
+  }
+);
+
 
   });
 
