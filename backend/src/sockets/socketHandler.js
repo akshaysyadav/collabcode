@@ -107,10 +107,21 @@ if (!alreadyExists) {
           u.socketId !== socket.id
       );
 
-    io.to(roomId).emit(
-      "room-users",
-      roomUsers[roomId]
-    );
+   const uniqueUsers =
+  [...new Map(
+    roomUsers[roomId].map(
+      item => [
+        item.user._id ||
+        item.user.id,
+        item
+      ]
+    )
+  ).values()];
+
+io.to(roomId).emit(
+  "room-users",
+  uniqueUsers
+);
 
   }
 
@@ -137,6 +148,48 @@ socket.on(
   }
 );
 
+
+socket.on(
+  "video-offer",
+  (data) => {
+
+    socket.to(
+      data.roomId
+    ).emit(
+      "video-offer",
+      data
+    );
+
+  }
+);
+
+socket.on(
+  "video-answer",
+  (data) => {
+
+    socket.to(
+      data.roomId
+    ).emit(
+      "video-answer",
+      data
+    );
+
+  }
+);
+
+socket.on(
+  "ice-candidate",
+  (data) => {
+
+    socket.to(
+      data.roomId
+    ).emit(
+      "ice-candidate",
+      data
+    );
+
+  }
+);
 
   });
 

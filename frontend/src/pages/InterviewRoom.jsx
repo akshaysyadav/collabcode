@@ -2,10 +2,12 @@ import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 
+import Peer from "simple-peer";
 import socket from "../socket";
 import { getMessages } from "../services/messageService";
 import { runCode } from "../services/codeService";
 import { getCode, saveCode } from "../services/codeRoomService";
+import { useRef} from "react";
 
 function InterviewRoom() {
   const { roomId } = useParams();
@@ -38,6 +40,13 @@ function InterviewRoom() {
   const [dataLoaded,
     setDataLoaded] =
     useState(false);
+
+  const myVideo = useRef();
+const userVideo = useRef();
+
+const peerRef = useRef(null);
+const streamRef = useRef(null);
+
 
   // INITIAL LOAD
   useEffect(() => {
@@ -282,6 +291,187 @@ function InterviewRoom() {
 
     };
 
+useEffect(() => {
+
+  navigator.mediaDevices
+    .getUserMedia({
+      video: true,
+      audio: true,
+    })
+    .then((stream) => {
+
+      streamRef.current =
+        stream;
+
+      if (myVideo.current) {
+
+        myVideo.current.srcObject =
+          stream;
+
+      }
+
+    });
+
+}, []);
+
+const startCall = () => {
+
+  if (!streamRef.current) {
+
+    alert("Camera not ready");
+    return;
+
+  }
+
+  const peer = new Peer({
+
+    initiator: true,
+
+    trickle: false,
+
+    stream: streamRef.current,
+
+  });
+
+  peer.on(
+    "signal",
+    (signal) => {
+
+      socket.emit(
+        "video-offer",
+        {
+          roomId,
+          signal,
+        }
+      );
+
+    }
+  );
+
+  peer.on(
+    "stream",
+    (remoteStream) => {
+
+      if (userVideo.current) {
+
+        userVideo.current.srcObject =
+          remoteStream;
+
+      }
+
+    }
+  );
+
+  peerRef.current = peer;
+
+};
+
+useEffect(() => {
+
+  socket.on(
+    "video-offer",
+    ({ signal }) => {
+
+      const peer =
+        new Peer({
+
+          initiator: false,
+
+          trickle: false,
+
+          stream:
+            streamRef.current,
+
+        });
+
+      peer.on(
+        "signal",
+        (
+          answerSignal
+        ) => {
+
+          socket.emit(
+            "video-answer",
+            {
+              roomId,
+              signal:
+                answerSignal,
+            }
+          );
+
+        }
+      );
+
+      peer.on(
+        "stream",
+        (
+          remoteStream
+        ) => {
+
+          if (
+            userVideo.current
+          ) {
+
+            userVideo.current.srcObject =
+              remoteStream;
+
+          }
+
+        }
+      );
+
+      peer.signal(
+        signal
+      );
+
+      peerRef.current =
+        peer;
+
+    }
+  );
+
+}, []);
+
+useEffect(() => {
+
+  socket.on(
+    "video-answer",
+    ({ signal }) => {
+
+      peerRef.current?.signal(
+        signal
+      );
+
+    }
+  );
+
+}, []);
+
+useEffect(() => {
+
+  return () => {
+
+    socket.off("video-offer");
+    socket.off("video-answer");
+
+  };
+
+}, []);
+useEffect(() => {
+
+  return () => {
+
+    peerRef.current?.destroy();
+
+    streamRef.current
+      ?.getTracks()
+      .forEach(track =>
+        track.stop()
+      );
+
+  };
+
+}, []);
   return (
     <div className="min-h-screen bg-slate-950">
       {/* Header */}
@@ -366,7 +556,39 @@ function InterviewRoom() {
               </pre>
             </div>
           </div>
+          {/* VIDEO CALL */}
+<div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
 
+  <h2 className="text-white mb-4">
+    Video Call
+  </h2>
+
+  <div className="grid grid-cols-2 gap-3">
+
+  <video
+    ref={myVideo}
+    autoPlay
+    muted
+    playsInline
+    className="rounded-lg"
+  />
+
+  <video
+    ref={userVideo}
+    autoPlay
+    playsInline
+    className="rounded-lg"
+  />
+  <button
+  onClick={startCall}
+  className="bg-green-600 px-4 py-2 rounded text-white mb-3"
+>
+  Start Call
+</button>
+
+</div>
+
+</div>
           {/* CHAT */}
           <div className="p-3 border-b border-slate-800">
 
@@ -377,7 +599,7 @@ function InterviewRoom() {
   {users.map((u) => (
 
     <div
-      key={u.socketId}
+      key={`${u.socketId}-${u.user.id}`}
       className="text-white text-sm"
     >
       👤 {u.user.name}
