@@ -1,670 +1,572 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router-dom";
 import Editor from "@monaco-editor/react";
 
-import Peer from "simple-peer";
 import socket from "../socket";
 import { getMessages } from "../services/messageService";
 import { runCode } from "../services/codeService";
 import { getCode, saveCode } from "../services/codeRoomService";
-import { useRef} from "react";
+import {
+  createConnection,
+  makeOffer,
+  makeAnswer,
+  applyAnswer,
+} from "../utils/webrtc";
 
 function InterviewRoom() {
   const { roomId } = useParams();
 
-  const user = JSON.parse(
-    localStorage.getItem("user")
+  const user = JSON.parse(localStorage.getItem("user"));
+
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [users, setUsers] = useState([]);
+  const [code, setCode] = useState("");
+  const [language, setLanguage] = useState("javascript");
+  const [output, setOutput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
+
+  const [mediaReady, setMediaReady] = useState(false);
+  const [mediaLoading, setMediaLoading] = useState(false);
+  const [mediaError, setMediaError] = useState(null);
+  const [remoteStreams, setRemoteStreams] = useState({});
+  const [callActive, setCallActive] = useState(false);
+
+  const myVideo = useRef(null);
+  const streamRef = useRef(null);
+  const peersRef = useRef(new Map());
+  const pendingOffersRef = useRef([]);
+
+  const destroyPeer = useCallback((targetSocketId) => {
+    const pc = peersRef.current.get(targetSocketId);
+    if (pc) {
+      pc.close();
+      peersRef.current.delete(targetSocketId);
+    }
+    setRemoteStreams((prev) => {
+      if (!prev[targetSocketId]) return prev;
+      const next = { ...prev };
+      delete next[targetSocketId];
+      return next;
+    });
+  }, []);
+
+  const destroyAllPeers = useCallback(() => {
+    peersRef.current.forEach((pc) => pc.close());
+    peersRef.current.clear();
+    setRemoteStreams({});
+    setCallActive(false);
+  }, []);
+
+  const ensureMedia = useCallback(async () => {
+    if (streamRef.current) {
+      return { ok: true, pending: [] };
+    }
+
+    setMediaLoading(true);
+    setMediaError(null);
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
+
+      streamRef.current = stream;
+
+      if (myVideo.current) {
+        myVideo.current.srcObject = stream;
+      }
+
+      setMediaReady(true);
+
+      const pending = [...pendingOffersRef.current];
+      pendingOffersRef.current = [];
+      return { ok: true, pending };
+    } catch (error) {
+      console.error("getUserMedia failed:", error);
+      setMediaError(
+        error.name === "NotAllowedError"
+          ? "Camera/mic permission denied — click Enable Camera and allow access"
+          : "Camera not available on this device"
+      );
+      return { ok: false, pending: [] };
+    } finally {
+      setMediaLoading(false);
+    }
+  }, []);
+
+  const createAnswerConnection = useCallback(
+    async (offer, fromSocketId) => {
+      if (fromSocketId === socket.id) return;
+
+      destroyPeer(fromSocketId);
+
+      const pc = createConnection(streamRef.current, (remoteStream) => {
+        setRemoteStreams((prev) => ({
+          ...prev,
+          [fromSocketId]: remoteStream,
+        }));
+        setCallActive(true);
+      });
+
+      pc.onconnectionstatechange = () => {
+        if (
+          pc.connectionState === "failed" ||
+          pc.connectionState === "disconnected"
+        ) {
+          destroyPeer(fromSocketId);
+        }
+      };
+
+      peersRef.current.set(fromSocketId, pc);
+
+      try {
+        const answer = await makeAnswer(pc, offer);
+        socket.emit("video-answer", {
+          roomId,
+          signal: answer,
+          targetSocketId: fromSocketId,
+        });
+      } catch (error) {
+        console.error("Failed to create answer:", error);
+        destroyPeer(fromSocketId);
+      }
+    },
+    [roomId, destroyPeer]
   );
 
-  const [messages, setMessages] =
-    useState([]);
+  const createOfferConnection = useCallback(
+    async (targetSocketId) => {
+      destroyPeer(targetSocketId);
 
-  const [input, setInput] =
-    useState("");
+      const pc = createConnection(streamRef.current, (remoteStream) => {
+        setRemoteStreams((prev) => ({
+          ...prev,
+          [targetSocketId]: remoteStream,
+        }));
+        setCallActive(true);
+      });
 
-  const [users, setUsers] =
-    useState([]);
+      pc.onconnectionstatechange = () => {
+        if (
+          pc.connectionState === "failed" ||
+          pc.connectionState === "disconnected"
+        ) {
+          destroyPeer(targetSocketId);
+        }
+      };
 
-  const [code, setCode] =
-    useState("");
+      peersRef.current.set(targetSocketId, pc);
 
-  const [language, setLanguage] =
-    useState("javascript");
+      try {
+        const offer = await makeOffer(pc);
+        socket.emit("video-offer", {
+          roomId,
+          signal: offer,
+          targetSocketId,
+        });
+      } catch (error) {
+        console.error("Failed to create offer:", error);
+        destroyPeer(targetSocketId);
+      }
+    },
+    [roomId, destroyPeer]
+  );
 
-  const [output, setOutput] =
-    useState("");
-
-  const [loading, setLoading] =
-    useState(false);
-
-  const [dataLoaded,
-    setDataLoaded] =
-    useState(false);
-
-  const myVideo = useRef();
-const userVideo = useRef();
-
-const peerRef = useRef(null);
-const streamRef = useRef(null);
-
+  const processPendingOffers = useCallback(
+    async (pending) => {
+      for (const { signal, fromSocketId } of pending) {
+        await createAnswerConnection(signal, fromSocketId);
+      }
+    },
+    [createAnswerConnection]
+  );
 
   // INITIAL LOAD
   useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const messagesData = await getMessages(roomId);
+        setMessages(messagesData);
 
-    const fetchData =
-      async () => {
+        const codeData = await getCode(roomId);
+        setCode(codeData.code || "");
+        setLanguage(codeData.language || "javascript");
 
-        try {
-
-          const messagesData =
-            await getMessages(
-              roomId
-            );
-
-          setMessages(
-            messagesData
-          );
-
-          const codeData =
-            await getCode(
-              roomId
-            );
-
-          setCode(
-            codeData.code || ""
-          );
-
-          setLanguage(
-            codeData.language ||
-            "javascript"
-          );
-
-          setDataLoaded(true);
-
-        } catch (error) {
-
-          console.log(error);
-
-        }
-
-      };
-
-    fetchData();
-
-  }, [roomId]);
-
-  // JOIN ROOM ONLY ONCE
-  useEffect(() => {
-
-    socket.emit(
-      "join-room",
-      {
-        roomId,
-        user,
+        setDataLoaded(true);
+      } catch (error) {
+        console.log(error);
       }
-    );
-
-  }, [roomId]);
-
-  // SOCKET LISTENERS
-  useEffect(() => {
-
-    socket.on(
-      "receive-message",
-      (message) => {
-
-        setMessages(
-          (prev) => [
-            ...prev,
-            message,
-          ]
-        );
-
-      }
-    );
-
-    socket.on(
-      "receive-code",
-      (newCode) => {
-
-        setCode(
-          (prev) => {
-
-            if (
-              prev === newCode
-            )
-              return prev;
-
-            return newCode;
-
-          }
-        );
-
-      }
-    );
-
-    socket.on(
-      "room-users",
-      (usersList) => {
-
-        setUsers(
-          usersList
-        );
-
-      }
-    );
-
-    return () => {
-
-      socket.off(
-        "receive-message"
-      );
-
-      socket.off(
-        "receive-code"
-      );
-
-      socket.off(
-        "room-users"
-      );
-
     };
 
+    fetchData();
+  }, [roomId]);
+
+  // JOIN ROOM (re-join on reconnect)
+  useEffect(() => {
+    const joinRoom = () => {
+      socket.emit("join-room", { roomId, user });
+    };
+
+    if (socket.connected) {
+      joinRoom();
+    }
+
+    socket.on("connect", joinRoom);
+
+    return () => {
+      socket.off("connect", joinRoom);
+    };
+  }, [roomId]);
+
+  // CHAT / CODE / USERS SOCKET LISTENERS
+  useEffect(() => {
+    const onReceiveMessage = (message) => {
+      setMessages((prev) => [...prev, message]);
+    };
+
+    const onReceiveCode = (newCode) => {
+      setCode((prev) => (prev === newCode ? prev : newCode));
+    };
+
+    const onRoomUsers = (usersList) => {
+      setUsers(usersList);
+    };
+
+    socket.on("receive-message", onReceiveMessage);
+    socket.on("receive-code", onReceiveCode);
+    socket.on("room-users", onRoomUsers);
+
+    return () => {
+      socket.off("receive-message", onReceiveMessage);
+      socket.off("receive-code", onReceiveCode);
+      socket.off("room-users", onRoomUsers);
+    };
   }, []);
 
   // AUTO SAVE CODE
   useEffect(() => {
+    if (!dataLoaded) return;
 
-    if (!dataLoaded)
-      return;
+    const timer = setTimeout(async () => {
+      try {
+        await saveCode(roomId, code, language);
+      } catch (error) {
+        console.log(error);
+      }
+    }, 1000);
 
-    const timer =
-      setTimeout(
-        async () => {
+    return () => clearTimeout(timer);
+  }, [code, language, roomId, dataLoaded]);
 
-          try {
+  // VIDEO SIGNALING LISTENERS
+  useEffect(() => {
+    const onVideoOffer = async ({ signal, fromSocketId }) => {
+      if (!fromSocketId || fromSocketId === socket.id || !signal) return;
 
-            await saveCode(
-              roomId,
-              code,
-              language
-            );
-
-          } catch (error) {
-
-            console.log(error);
-
-          }
-
-        },
-        1000
-      );
-
-    return () =>
-      clearTimeout(timer);
-
-  }, [
-    code,
-    language,
-    roomId,
-    dataLoaded,
-  ]);
-
-  const sendMessage =
-    () => {
-
-      if (
-        !input.trim()
-      )
+      if (!streamRef.current) {
+        pendingOffersRef.current.push({ signal, fromSocketId });
         return;
+      }
 
-      socket.emit(
-        "send-message",
-        {
-          roomId,
-          sender:
-            user?._id ||
-            user?.id,
-          message:
-            input,
-        }
-      );
-
-      setInput("");
-
+      await createAnswerConnection(signal, fromSocketId);
     };
 
-  const handleCodeChange =
-    (value) => {
+    const onVideoAnswer = async ({ signal, fromSocketId }) => {
+      if (!fromSocketId || !signal) return;
 
-      const newCode =
-        value || "";
-
-      setCode(
-        newCode
-      );
-
-      socket.emit(
-        "code-change",
-        {
-          roomId,
-          code: newCode,
-        }
-      );
-
-    };
-
-  const handleRunCode =
-    async () => {
+      const pc = peersRef.current.get(fromSocketId);
+      if (!pc || pc.signalingState === "closed") return;
 
       try {
-
-        setLoading(true);
-
-        const result =
-          await runCode(
-            code,
-            language
-          );
-
-        setOutput(
-          JSON.stringify(
-            result,
-            null,
-            2
-          )
-        );
-
+        await applyAnswer(pc, signal);
       } catch (error) {
-
-        console.log(error);
-
-        setOutput(
-          "Execution Failed"
-        );
-
-      } finally {
-
-        setLoading(false);
-
+        console.error("Failed to apply answer:", error);
+        destroyPeer(fromSocketId);
       }
-
     };
 
-useEffect(() => {
+    socket.on("video-offer", onVideoOffer);
+    socket.on("video-answer", onVideoAnswer);
 
-  navigator.mediaDevices
-    .getUserMedia({
-      video: true,
-      audio: true,
-    })
-    .then((stream) => {
+    return () => {
+      socket.off("video-offer", onVideoOffer);
+      socket.off("video-answer", onVideoAnswer);
+    };
+  }, [createAnswerConnection, destroyPeer]);
 
-      streamRef.current =
-        stream;
+  // CLEANUP ON UNMOUNT
+  useEffect(() => {
+    return () => {
+      destroyAllPeers();
+      pendingOffersRef.current = [];
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    };
+  }, [destroyAllPeers]);
 
-      if (myVideo.current) {
+  const sendMessage = () => {
+    if (!input.trim()) return;
 
-        myVideo.current.srcObject =
-          stream;
-
-      }
-
+    socket.emit("send-message", {
+      roomId,
+      sender: user?._id || user?.id,
+      message: input,
     });
 
-}, []);
-
-const startCall = () => {
-
-  if (!streamRef.current) {
-
-    alert("Camera not ready");
-    return;
-
-  }
-
-  const peer = new Peer({
-
-    initiator: true,
-
-    trickle: false,
-
-    stream: streamRef.current,
-
-  });
-
-  peer.on(
-    "signal",
-    (signal) => {
-
-      socket.emit(
-        "video-offer",
-        {
-          roomId,
-          signal,
-        }
-      );
-
-    }
-  );
-
-  peer.on(
-    "stream",
-    (remoteStream) => {
-
-      if (userVideo.current) {
-
-        userVideo.current.srcObject =
-          remoteStream;
-
-      }
-
-    }
-  );
-
-  peerRef.current = peer;
-
-};
-
-useEffect(() => {
-
-  socket.on(
-    "video-offer",
-    ({ signal }) => {
-
-      const peer =
-        new Peer({
-
-          initiator: false,
-
-          trickle: false,
-
-          stream:
-            streamRef.current,
-
-        });
-
-      peer.on(
-        "signal",
-        (
-          answerSignal
-        ) => {
-
-          socket.emit(
-            "video-answer",
-            {
-              roomId,
-              signal:
-                answerSignal,
-            }
-          );
-
-        }
-      );
-
-      peer.on(
-        "stream",
-        (
-          remoteStream
-        ) => {
-
-          if (
-            userVideo.current
-          ) {
-
-            userVideo.current.srcObject =
-              remoteStream;
-
-          }
-
-        }
-      );
-
-      peer.signal(
-        signal
-      );
-
-      peerRef.current =
-        peer;
-
-    }
-  );
-
-}, []);
-
-useEffect(() => {
-
-  socket.on(
-    "video-answer",
-    ({ signal }) => {
-
-      peerRef.current?.signal(
-        signal
-      );
-
-    }
-  );
-
-}, []);
-
-useEffect(() => {
-
-  return () => {
-
-    socket.off("video-offer");
-    socket.off("video-answer");
-
+    setInput("");
   };
 
-}, []);
-useEffect(() => {
+  const handleCodeChange = (value) => {
+    const newCode = value || "";
+    setCode(newCode);
 
-  return () => {
-
-    peerRef.current?.destroy();
-
-    streamRef.current
-      ?.getTracks()
-      .forEach(track =>
-        track.stop()
-      );
-
+    socket.emit("code-change", {
+      roomId,
+      code: newCode,
+    });
   };
 
-}, []);
+  const handleRunCode = async () => {
+    try {
+      setLoading(true);
+      const result = await runCode(code, language);
+      setOutput(JSON.stringify(result, null, 2));
+    } catch (error) {
+      console.log(error);
+      setOutput("Execution Failed");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const enableCamera = async () => {
+    const result = await ensureMedia();
+    if (result.ok && result.pending.length > 0) {
+      await processPendingOffers(result.pending);
+    }
+  };
+
+  const startCall = async () => {
+    const result = await ensureMedia();
+    if (!result.ok) return;
+
+    if (result.pending.length > 0) {
+      await processPendingOffers(result.pending);
+    }
+
+    const others = users.filter((u) => u.socketId !== socket.id);
+
+    if (others.length === 0) {
+      alert("No one else is in the room yet");
+      return;
+    }
+
+    for (const { socketId: targetSocketId } of others) {
+      await createOfferConnection(targetSocketId);
+    }
+  };
+
+  const endCall = () => {
+    destroyAllPeers();
+  };
+
+  const remoteStreamList = Object.entries(remoteStreams);
+
   return (
     <div className="min-h-screen bg-slate-950">
-      {/* Header */}
       <div className="border-b border-slate-800">
         <div className="max-w-6xl mx-auto p-5">
-          <h1 className="text-white text-2xl font-bold">
-            CollabCode
-          </h1>
-
-          <p className="text-slate-400">
-            Room ID: {roomId}
-          </p>
+          <h1 className="text-white text-2xl font-bold">CollabCode</h1>
+          <p className="text-slate-400">Room ID: {roomId}</p>
         </div>
       </div>
 
-      {/* Main Section */}
       <div className="max-w-7xl mx-auto p-6">
         <div className="grid lg:grid-cols-3 gap-6">
           {/* CODE EDITOR */}
           <div className="col-span-2 bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
             <div className="p-4 border-b border-slate-800 flex justify-between">
-              <h2 className="text-white font-semibold">
-                Code Editor
-              </h2>
+              <h2 className="text-white font-semibold">Code Editor</h2>
 
               <select
                 value={language}
-                onChange={(e) =>
-                  setLanguage(
-                    e.target.value
-                  )
-                }
+                onChange={(e) => setLanguage(e.target.value)}
                 className="bg-slate-800 text-white px-3 py-1 rounded"
               >
-                <option value="javascript">
-                  JavaScript
-                </option>
-
-                <option value="java">
-                  Java
-                </option>
-
-                <option value="cpp">
-                  C++
-                </option>
-
-                <option value="python">
-                  Python
-                </option>
+                <option value="javascript">JavaScript</option>
+                <option value="java">Java</option>
+                <option value="python">Python</option>
+                <option value="cpp">C++</option>
               </select>
             </div>
 
-   <Editor
-  height="600px"
-  language={language}
-  theme="vs-dark"
-  value={code}
-  onChange={handleCodeChange}
-/>
+            <Editor
+              height="600px"
+              language={language}
+              theme="vs-dark"
+              value={code}
+              onChange={handleCodeChange}
+            />
 
             <div className="border-t border-slate-800 p-4">
               <button
-                onClick={
-                  handleRunCode
-                }
+                onClick={handleRunCode}
                 disabled={loading}
                 className="bg-green-600 hover:bg-green-700 px-5 py-2 rounded text-white"
               >
-                {loading
-                  ? "Running..."
-                  : "Run Code"}
+                {loading ? "Running..." : "Run Code"}
               </button>
             </div>
 
             <div className="bg-slate-950 border-t border-slate-800 p-4">
-              <h3 className="text-white mb-2">
-                Output
-              </h3>
-
-              <pre className="text-green-400 whitespace-pre-wrap">
-                {output}
-              </pre>
+              <h3 className="text-white mb-2">Output</h3>
+              <pre className="text-green-400 whitespace-pre-wrap">{output}</pre>
             </div>
           </div>
-          {/* VIDEO CALL */}
-<div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
 
-  <h2 className="text-white mb-4">
-    Video Call
-  </h2>
+          {/* RIGHT COLUMN: Video + Participants + Chat */}
+          <div className="flex flex-col gap-6">
+            {/* VIDEO CALL */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <h2 className="text-white mb-4">Video Call</h2>
 
-  <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <p className="text-slate-400 text-xs mb-1">You</p>
+                  <video
+                    ref={myVideo}
+                    autoPlay
+                    muted
+                    playsInline
+                    className="rounded-lg w-full bg-slate-800 aspect-video object-cover"
+                  />
+                </div>
 
-  <video
-    ref={myVideo}
-    autoPlay
-    muted
-    playsInline
-    className="rounded-lg"
-  />
-
-  <video
-    ref={userVideo}
-    autoPlay
-    playsInline
-    className="rounded-lg"
-  />
-  <button
-  onClick={startCall}
-  className="bg-green-600 px-4 py-2 rounded text-white mb-3"
->
-  Start Call
-</button>
-
-</div>
-
-</div>
-          {/* CHAT */}
-          <div className="p-3 border-b border-slate-800">
-
-  <h3 className="text-slate-300 text-sm mb-2">
-    Participants
-  </h3>
-
-  {users.map((u) => (
-
-    <div
-      key={`${u.socketId}-${u.user.id}`}
-      className="text-white text-sm"
-    >
-      👤 {u.user.name}
-    </div>
-
-  ))}
-
-</div>
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[670px]">
-            <div className="p-4 border-b border-slate-800">
-              <h2 className="text-white font-semibold">
-                Chat
-              </h2>
-              <p className="text-slate-400 text-sm">
-    Active Users:
-    {" "}
-    {users.length}
-  </p>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {messages.map(
-                (msg, index) => (
-                  <div
-                    key={
-                      msg._id ||
-                      index
-                    }
-                    className="bg-slate-800 p-3 rounded-lg"
-                  >
-                    <p className="text-blue-400 text-sm">
-                      {msg.sender
-                        ?.name ||
-                        "User"}
-                    </p>
-
-                    <p className="text-white">
-                      {msg.message}
-                    </p>
+                {remoteStreamList.length > 0 ? (
+                  remoteStreamList.map(([socketId, stream]) => {
+                    const remoteUser = users.find(
+                      (u) => u.socketId === socketId
+                    );
+                    return (
+                      <div key={socketId}>
+                        <p className="text-slate-400 text-xs mb-1">
+                          {remoteUser?.user?.name || "Remote"}
+                        </p>
+                        <video
+                          autoPlay
+                          playsInline
+                          ref={(el) => {
+                            if (el) el.srcObject = stream;
+                          }}
+                          className="rounded-lg w-full bg-slate-800 aspect-video object-cover"
+                        />
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div>
+                    <p className="text-slate-400 text-xs mb-1">Remote</p>
+                    <div className="rounded-lg w-full bg-slate-800 aspect-video flex items-center justify-center">
+                      <span className="text-slate-500 text-sm">
+                        {callActive
+                          ? "Connecting..."
+                          : "Waiting for peer..."}
+                      </span>
+                    </div>
                   </div>
-                )
+                )}
+              </div>
+
+              <div className="flex flex-wrap gap-2 mt-3">
+                {!mediaReady && (
+                  <button
+                    onClick={enableCamera}
+                    disabled={mediaLoading}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed px-4 py-2 rounded text-white"
+                  >
+                    {mediaLoading ? "Requesting access..." : "Enable Camera"}
+                  </button>
+                )}
+
+                <button
+                  onClick={startCall}
+                  disabled={mediaLoading}
+                  className="bg-green-600 hover:bg-green-700 disabled:bg-slate-600 disabled:cursor-not-allowed px-4 py-2 rounded text-white"
+                >
+                  Start Call
+                </button>
+
+                {(callActive || remoteStreamList.length > 0) && (
+                  <button
+                    onClick={endCall}
+                    className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-white"
+                  >
+                    End Call
+                  </button>
+                )}
+              </div>
+
+              {mediaError && (
+                <p className="text-red-400 text-sm mt-2">{mediaError}</p>
               )}
             </div>
 
-            <div className="border-t border-slate-800 p-4 flex gap-2">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) =>
-                  setInput(
-                    e.target.value
-                  )
-                }
-                placeholder="Type message..."
-                className="flex-1 px-3 py-2 bg-slate-800 rounded text-white"
-              />
+            {/* PARTICIPANTS */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4">
+              <h3 className="text-slate-300 text-sm mb-2">Participants</h3>
+              {users.map((u) => (
+                <div
+                  key={`${u.socketId}-${u.user.id || u.user._id}`}
+                  className="text-white text-sm"
+                >
+                  👤 {u.user.name}
+                  {u.socketId === socket.id ? " (you)" : ""}
+                </div>
+              ))}
+            </div>
 
-              <button
-                onClick={
-                  sendMessage
-                }
-                className="bg-blue-600 px-4 rounded text-white"
-              >
-                Send
-              </button>
+            {/* CHAT */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl flex flex-col h-[400px]">
+              <div className="p-4 border-b border-slate-800">
+                <h2 className="text-white font-semibold">Chat</h2>
+                <p className="text-slate-400 text-sm">
+                  Active Users: {users.length}
+                </p>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {messages.map((msg, index) => (
+                  <div
+                    key={msg._id || index}
+                    className="bg-slate-800 p-3 rounded-lg"
+                  >
+                    <p className="text-blue-400 text-sm">
+                      {msg.sender?.name || "User"}
+                    </p>
+                    <p className="text-white">{msg.message}</p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="border-t border-slate-800 p-4 flex gap-2">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendMessage()}
+                  placeholder="Type message..."
+                  className="flex-1 px-3 py-2 bg-slate-800 rounded text-white"
+                />
+                <button
+                  onClick={sendMessage}
+                  className="bg-blue-600 px-4 rounded text-white"
+                >
+                  Send
+                </button>
+              </div>
             </div>
           </div>
         </div>

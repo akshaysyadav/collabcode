@@ -149,47 +149,37 @@ socket.on(
 );
 
 
-socket.on(
-  "video-offer",
-  (data) => {
+// VIDEO SIGNALING — point-to-point via socket IDs (not room broadcast)
+socket.on("video-offer", ({ roomId, signal, targetSocketId }) => {
+  if (!signal || !roomId) return;
 
-    socket.to(
-      data.roomId
-    ).emit(
-      "video-offer",
-      data
-    );
+  const payload = {
+    signal,
+    fromSocketId: socket.id,
+    fromUser: socket.user,
+  };
 
+  if (targetSocketId) {
+    io.to(targetSocketId).emit("video-offer", payload);
+  } else {
+    socket.to(roomId).emit("video-offer", payload);
   }
-);
+});
 
-socket.on(
-  "video-answer",
-  (data) => {
+socket.on("video-answer", ({ roomId, signal, targetSocketId }) => {
+  if (!signal) return;
 
-    socket.to(
-      data.roomId
-    ).emit(
-      "video-answer",
-      data
-    );
+  const payload = {
+    signal,
+    fromSocketId: socket.id,
+  };
 
+  if (targetSocketId) {
+    io.to(targetSocketId).emit("video-answer", payload);
+  } else if (roomId) {
+    socket.to(roomId).emit("video-answer", payload);
   }
-);
-
-socket.on(
-  "ice-candidate",
-  (data) => {
-
-    socket.to(
-      data.roomId
-    ).emit(
-      "ice-candidate",
-      data
-    );
-
-  }
-);
+});
 
   });
 
